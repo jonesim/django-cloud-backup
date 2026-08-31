@@ -103,6 +103,15 @@ class S3Storage(BackupStorage):
     def _head_metadata(self, key):
         return self.s3.head_object(Bucket=self.bucket, Key=key).get('Metadata', {})
 
+    def file_metadata(self, stored_file):
+        """A listing carries no metadata on S3, so a file dict from one made without
+        include_metadata has an empty dict: fetch it with a HEAD on first use and keep
+        it on the dict. An object that genuinely has no metadata costs a HEAD each
+        time - rare (nothing this package uploads is without it) and harmless."""
+        if not stored_file.get('metadata'):
+            stored_file['metadata'] = self._head_metadata(stored_file['id'])
+        return stored_file['metadata']
+
     def _metadata_map(self, keys):
         """Metadata for several objects at once. S3 needs a HEAD per object and a
         listing can cover hundreds of them, so they go out in parallel."""

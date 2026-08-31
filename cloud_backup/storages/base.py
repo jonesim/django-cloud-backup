@@ -68,6 +68,13 @@ class BackupStorage:
         on backends that can't list metadata)."""
         raise NotImplementedError
 
+    def file_metadata(self, stored_file):
+        """The metadata of a file dict from a listing made without include_metadata.
+        Backends whose listings cannot carry metadata (S3: a HEAD per object) fetch it
+        on first use and keep it on the dict, so a caller can list cheaply and pay for
+        metadata only on the files it cannot judge from the listing alone."""
+        return stored_file.get('metadata') or {}
+
     def get_file(self, file_id):
         """Return the normalised dict for a file reference, or raise StorageFileNotFound."""
         raise NotImplementedError
