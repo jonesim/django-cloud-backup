@@ -120,16 +120,28 @@ class BackupAzure(BaseBackup):
         except ResourceNotFoundError:
             return None
 
-    @staticmethod
-    def compare(stored_file, blob):
+    def compare(self, stored_file, blob):
         """'match', 'changed', 'missing' or 'no_checksum' for a stored file against the
-        blob it was backed up from. The plaintext md5 is compared when both sides have
-        one - an unchanged file re-uploaded to Azure gets a new etag but the same md5 -
-        and otherwise the etag recorded at upload."""
+        blob it was backed up from.
+
+        Decided from the listing alone wherever possible: the backend's hash of the
+        stored bytes is the plaintext md5 for an unencrypted single-part copy (a
+        multipart copy's hash is already the recorded md5), so equal hashes settle the
+        common case - an unchanged blob - with no further request. Only when that does
+        not settle it is the stored metadata consulted, fetched on demand where the
+        listing could not carry it (a HEAD per object on S3): the plaintext md5 recorded
+        at upload - an unchanged file re-uploaded to Azure gets a new etag but the same
+        md5, and the md5 survives client-side encryption - and otherwise the etag."""
         if blob is None:
             return 'missing'
+        if not stored_file:
+            # the file browser's verify passes {} for a stored file deleted since the
+            # page was listed: nothing to fetch metadata for
+            return 'no_checksum'
         md5, etag = blob_fingerprint(blob)
-        metadata = stored_file.get('metadata') or {}
+        if md5 and stored_file.get('hash') == md5:
+            return 'match'
+        metadata = self.storage.file_metadata(stored_file)
         if md5 and metadata.get('md5'):
             return 'match' if md5 == metadata['md5'] else 'changed'
         if metadata.get('etag'):
@@ -140,25 +152,36 @@ class BackupAzure(BaseBackup):
             return 'match' if md5 == stored_file['hash'] else 'changed'
         return 'no_checksum'
 
+    def stored_files(self, backup_dir):
+        """{relative path: {name: [file dicts]}} for everything already under
+        backup_dir - one recursive listing of the destination rather than one per
+        folder, and without metadata: compare() asks for it only where the listing
+        cannot decide."""
+        base = self.storage.ensure_folder(backup_dir, parent=self.base_backup_dir)
+        stored = {}
+        for path, stored_file in self.storage.walk(base):
+            stored.setdefault(path, {}).setdefault(stored_file['name'], []).append(stored_file)
+        self.logger.info(f'{sum(len(files) for names in stored.values() for files in names.values()):,} '
+                         f'files already in {backup_dir}')
+        return stored
+
     def backup_folder(self, prefix, backup_dir):
         self.logger.info(f'Backing up {self.describe(prefix)} to {backup_dir}')
         mode = self.config.changed_files
         lock_days = self.storage.lock_days('file')
-        folders = {}
+        stored = self.stored_files(backup_dir)
+        handles = {}
 
         def folder(path):
-            # destination folder handle plus the files already in it, listed once per
-            # folder however many blobs it holds
-            if path not in folders:
+            if path not in handles:
                 name = f'{backup_dir}/{path}' if path else backup_dir
-                handle = self.storage.ensure_folder(name, parent=self.base_backup_dir)
-                folders[path] = (handle, self.get_files_by_name(handle, include_metadata=True))
-            return folders[path]
+                handles[path] = self.storage.ensure_folder(name, parent=self.base_backup_dir)
+            return handles[path]
 
         for rel_path, blob in self.blobs(prefix):
             path, _, name = rel_path.rpartition('/')
-            handle, files_by_name = folder(path)
-            existing = files_by_name.get(name, [])
+            handle = folder(path)
+            existing = stored.get(path, {}).get(name, [])
             if any(self.compare(e, blob) == 'match' for e in existing):
                 self.logger.info('    Exists - ' + rel_path)
                 continue
@@ -194,9 +217,10 @@ class BackupAzure(BaseBackup):
         if folder is None:
             self.logger.warning(f'No backup folder found for {backup_dir}')
             return results
-        # one listing of the source rather than a properties request per file
+        # one listing of the source rather than a properties request per file, and the
+        # stored metadata only for files compare() cannot settle from the listing
         blobs = dict(self.blobs(prefix))
-        for path, stored_file in self.storage.walk(folder, include_metadata=True):
+        for path, stored_file in self.storage.walk(folder):
             rel_path = f"{path}/{stored_file['name']}" if path else stored_file['name']
             status = self.compare(stored_file, blobs.get(rel_path))
             if status == 'match':

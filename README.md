@@ -817,7 +817,12 @@ Both are available per config as `azure_dirs` / `azure_source`. Nothing is downl
 to decide what needs backing up: a blob is skipped when its md5 (which Azure records
 for single-request uploads - django-storages' normal case) or otherwise its etag
 matches what was stored with the backup, so an unchanged blob costs one listing entry
-and a changed one is re-uploaded. The `backup_azure_s3.BackupAzureToS3` class is
+and a changed one is re-uploaded. The destination is listed once, recursively, rather
+than folder by folder, and its stored metadata - a request per object on S3-compatible
+storage - is only read for the files the listing cannot settle by hash (blobs Azure holds
+no md5 for, encrypted copies, and anything that has actually changed), so a nightly run
+over a large, mostly unchanged container is a couple of listings and a few requests, not
+one per file. The `backup_azure_s3.BackupAzureToS3` class is
 different: a standalone rclone-compatible mirror that bypasses this pipeline.
 
 ## Configure S3 folder backups
