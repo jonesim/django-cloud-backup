@@ -150,6 +150,21 @@ def latest_due_slot(now, schedule, grace):
     return None
 
 
+def firing_days(today, schedule, count):
+    """The most recent `count` days the schedule fires on, today first - or simply the
+    last `count` days when there is no schedule. Bounds the listings and expectations
+    that would otherwise assume a backup every day: on a mon-fri schedule the newest
+    dump is Friday's all weekend, and so is the newest daily copy."""
+    days = []
+    for days_back in range(MAX_LOOKBACK_DAYS):
+        day = today - datetime.timedelta(days=days_back)
+        if schedule is None or schedule.fires_on(day):
+            days.append(day)
+            if len(days) == count:
+                break
+    return days
+
+
 def grade_time(now, when, schedule, options):
     """(status, alert_at text) for something that should be as new as the last scheduled
     run - or, with no schedule, no older than max_age_hours."""
@@ -194,17 +209,19 @@ def fmt_size(size):
 # ----------------------------------------------------------------------------------------
 # What is at the destination
 
-def newest_dumps(backup, today):
-    """Database dumps newest first, as (time taken, size, key). Tiered layouts list
-    today's and yesterday's hourly folders - enough for the newest dump and the one
-    before it, even for the first run of the day; the flat legacy layout is listed whole."""
+def newest_dumps(backup, today, schedule=None):
+    """Database dumps newest first, as (time taken, size, key). Tiered layouts list the
+    hourly folders of today and the two most recent days the schedule fires on - enough
+    for the newest dump and the one before it, even for the first run of the day, and
+    over a weekend the schedule skips; the flat legacy layout is listed whole."""
     storage = backup.storage
     db = backup.get_backup_db()
     dumps = []
     if backup.config.db_tiers:
-        for days_back in (0, 1):
-            folder = storage.ensure_folder(hourly_dir(today - datetime.timedelta(days=days_back)),
-                                           parent=db.base_backup_dir)
+        # today is always listed - a manual run lands there whatever the schedule says
+        days = dict.fromkeys([today] + firing_days(today, schedule, 2))
+        for day in days:
+            folder = storage.ensure_folder(hourly_dir(day), parent=db.base_backup_dir)
             for f in storage.list_files(folder):
                 parsed = parse_dump(f['name'])
                 if parsed:
@@ -361,11 +378,15 @@ def dump_checks(now, dumps, schedule, options):
     return checks
 
 
-def daily_check(now, newest, options):
+def daily_check(now, newest, options, schedule=None):
     if newest is None:
         return check('Latest daily copy', 'none', 'missing', MISSING)
     day, size, key = newest
-    expected = now.date() - datetime.timedelta(days=1 if now.time() >= promotion_deadline(options) else 2)
+    # a day's copy appears the morning after, once promotion has run; the copy that must
+    # be there is the last day the backups ran before that, so a mon-fri schedule's
+    # Friday copy is current until Tuesday morning
+    cutoff = now.date() - datetime.timedelta(days=1 if now.time() >= promotion_deadline(options) else 2)
+    expected = (firing_days(cutoff, schedule, 1) or [cutoff])[0]
     return check('Latest daily copy', f'{day:%a %d %b}, {fmt_size(size)}', f'before {expected:%a %d %b}',
                  OK if day >= expected else STALE, day=day.isoformat(), size=size, key=key)
 
@@ -420,12 +441,12 @@ def config_checks(backup, now):
     checks = []
     if config.include_db:
         try:
-            checks += dump_checks(now, newest_dumps(backup, now.date()), schedule_slots(BackupRun.BACKUP, config.name),
-                                  options)
+            schedule = schedule_slots(BackupRun.BACKUP, config.name)
+            checks += dump_checks(now, newest_dumps(backup, now.date(), schedule), schedule, options)
             if config.db_tiers:
                 daily = promoted_copies(backup, DAILY)
                 monthly = promoted_copies(backup, MONTHLY)
-                checks.append(daily_check(now, daily[-1] if daily else None, options))
+                checks.append(daily_check(now, daily[-1] if daily else None, options, schedule))
                 checks.append(monthly_check(now, monthly[-1] if monthly else None, options,
                                             daily[0][0] if daily else None))
         except Exception as e:  # noqa: BLE001

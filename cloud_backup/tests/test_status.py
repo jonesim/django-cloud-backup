@@ -154,6 +154,20 @@ class PromotedTierTest(SimpleTestCase):
         self.assertEqual(daily_check(early, (yesterday - datetime.timedelta(days=1), 1, 'k'), OPTIONS)['status'], OK)
         self.assertEqual(daily_check(NOW, None, OPTIONS)['status'], MISSING)
 
+    def test_daily_over_the_weekend(self):
+        # mon-fri backups: Friday's copy (promoted Saturday morning) is the newest there
+        # can be until Monday's dumps are promoted on Tuesday morning
+        weekdays = Schedule(DB_SLOTS.slots, days_of_week={1, 2, 3, 4, 5})
+        friday = datetime.date(2026, 8, 28)
+        for day in range(29, 32):     # Saturday, Sunday, Monday
+            at = datetime.datetime(2026, 8, day, 10, 30)
+            self.assertEqual(daily_check(at, (friday, 1, 'k'), OPTIONS, weekdays)['status'], OK, at)
+        tuesday = datetime.datetime(2026, 9, 1, 10, 30)
+        self.assertEqual(daily_check(tuesday, (friday, 1, 'k'), OPTIONS, weekdays)['status'], STALE)
+        self.assertEqual(daily_check(tuesday, (datetime.date(2026, 8, 31), 1, 'k'), OPTIONS, weekdays)['status'], OK)
+        # and before Tuesday's promotion deadline Friday's is still fine
+        self.assertEqual(daily_check(tuesday.replace(hour=5), (friday, 1, 'k'), OPTIONS, weekdays)['status'], OK)
+
     def test_monthly(self):
         self.assertEqual(monthly_check(NOW, (datetime.date(2026, 7, 1), 1, 'k'), OPTIONS)['status'], OK)
         self.assertEqual(monthly_check(NOW, (datetime.date(2026, 6, 1), 1, 'k'), OPTIONS)['status'], STALE)
@@ -340,6 +354,27 @@ class CollectTest(SimpleTestCase):
             status = collect(['database'], now=NOW)
         self.assertEqual(status['checks'][0]['metric'], 'Latest database dump')
         self.assertEqual(status['problems'], ['Backup run', 'Tier promotion run'])
+
+    @override_settings(CELERY_BEAT_SCHEDULE={
+        'backup_db': {'task': 'cloud_backup.tasks.backup', 'kwargs': {'config': 'database'},
+                      'schedule': crontab(hour='8-19', minute=50, day_of_week='mon-fri')}})
+    def test_weekday_schedule_over_the_weekend(self):
+        # Friday's dumps are the newest all weekend: the hourly listing has to reach back
+        # to them, and the daily tier is not expected to hold a Saturday or Sunday copy
+        friday = {'django_backup/db/hourly/2026/08/28/db_2026_08_28_08_50_00.dump': 1_000_000,
+                  'django_backup/db/hourly/2026/08/28/db_2026_08_28_19_50_00.dump': 1_000_000,
+                  'django_backup/db/daily/20_117_165_6/db_2026-08-28.dump': 1_000_000,
+                  'django_backup/db/monthly/20_117_165_6/db_2026-07.dump': 900_000}
+        friday_run = run('database', 'backup', finished=datetime.datetime(2026, 8, 28, 19, 55))
+        for now in (datetime.datetime(2026, 8, 30, 10, 30), datetime.datetime(2026, 8, 31, 8, 15)):  # Sun, Mon
+            with patch.object(st, 'backup_for', side_effect=fake_backups(friday)), \
+                    patch.object(st, 'latest_run', side_effect=lambda c, k: friday_run if k == 'backup' else None):
+                status = collect(['database'], now=now)
+            by_metric = {c['metric']: c for c in status['checks']}
+            self.assertEqual(by_metric['Latest database dump']['status'], OK, now)
+            self.assertEqual(by_metric['Dump size vs previous']['status'], OK, now)
+            self.assertEqual(by_metric['Latest daily copy']['status'], OK, now)
+            self.assertEqual(status['problems'], ['Tier promotion run'], now)  # no run given, so missing
 
     def test_stopped_beat(self):
         # nothing since yesterday evening and no runs recorded
