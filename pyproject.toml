@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "django-cloud-backup"
-version = "0.1.1"
+version = "0.1.2"
 description = "Backs up django postgres databases, local folders and S3 folders to Google Drive, S3-compatible storage (AWS, Backblaze B2, Cloudflare R2) or Azure Blob Storage."
 readme = "README.md"
 requires-python = ">=3.8"
