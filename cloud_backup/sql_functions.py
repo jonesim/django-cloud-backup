@@ -1,4 +1,8 @@
+import re
+
 from django.db import connection
+
+SCHEMA_NAME_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
 
 
 def get_schemas():
@@ -44,3 +48,42 @@ def get_table_data(schema, table_name):
 def delete_table(schema, table_name):
     with connection.cursor() as cursor:
         cursor.execute(f'DELETE from {schema}.{table_name}')
+
+
+def get_schema_extensions(schema):
+    """Names of the extensions installed in schema. A DROP SCHEMA ... CASCADE removes them
+    along with it, and a pg_dump -n of the schema does not recreate them, so a restore of
+    that dump fails on anything that uses them (e.g. a gin_trgm_ops index)."""
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT e.extname FROM pg_catalog.pg_extension e '
+                       'JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace '
+                       'WHERE n.nspname = %s ORDER BY e.extname', [schema])
+        return [row[0] for row in cursor.fetchall()]
+
+
+def quote_identifier(name):
+    """name as a quoted SQL identifier - safe for any name, so names read back from a dump's
+    stored metadata need no validating. Neither driver is a dependency, hence not sql.Identifier."""
+    if not name or '\0' in name:
+        raise ValueError(f'Invalid identifier: {name!r}')
+    return '"' + name.replace('"', '""') + '"'
+
+
+def create_extensions(schema, extensions):
+    """Create each extension in schema unless it is already installed. Returns
+    {extension: schema} for those installed in a different schema, which IF NOT EXISTS
+    leaves where they are - a dump that refers to schema.<type> will still fail on them."""
+    if not extensions:
+        return {}
+    quoted_schema = quote_identifier(schema)
+    quoted = [quote_identifier(extension) for extension in extensions]
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT e.extname, n.nspname FROM pg_catalog.pg_extension e '
+                       'JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace '
+                       'WHERE e.extname = ANY(%s)', [list(extensions)])
+        elsewhere = {name: nspname for name, nspname in cursor.fetchall() if nspname != schema}
+        # a fresh database may not have the schema yet - pg_restore then only warns that it exists
+        cursor.execute(f'CREATE SCHEMA IF NOT EXISTS {quoted_schema}')
+        for extension in quoted:
+            cursor.execute(f'CREATE EXTENSION IF NOT EXISTS {extension} SCHEMA {quoted_schema}')
+    return elsewhere

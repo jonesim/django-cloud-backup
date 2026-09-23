@@ -13,7 +13,11 @@ from .db_tiers import (DAILY, DB_FILE_EXTENSIONS, DELETE_APP, DUMP_EXTENSION, HO
                        tier_prefixes)
 from .encryption import decrypt_in_place, encrypt_file
 from .prune_backups import PruneBackups
-from .sql_functions import delete_table
+from .sql_functions import create_extensions, delete_table, get_schema_extensions
+
+EXTENSIONS_KEY = 'extensions'
+# Google Drive's limit on one appProperty, key plus value - the smallest of the backends
+MAX_METADATA_ITEM_BYTES = 124
 
 
 def get_ip_address():
@@ -55,6 +59,7 @@ class BackupDb(BaseBackup):
             base_name = f'table_{self.postgres_backup.table}'
         elif self.postgres_backup.schema:
             metadata['schema'] = self.postgres_backup.schema
+            metadata.update(self.extensions_metadata(self.postgres_backup.schema))
             base_name = f'schema_{self.postgres_backup.schema}'
         else:
             base_name = 'db'
@@ -105,9 +110,32 @@ class BackupDb(BaseBackup):
         else:
             file_info = self.storage.find_file(self.base_backup_dir, file_name)
         local_name = self.storage.download(file_info, local_folder=self.local_backup_dir)
-        if file_info['metadata'].get('table'):
-            delete_table(file_info['metadata']['schema'], file_info['metadata']['table'])
+        metadata = file_info['metadata']
+        if metadata.get('table'):
+            delete_table(metadata['schema'], metadata['table'])
+        elif metadata.get('schema') and metadata.get(EXTENSIONS_KEY):
+            # a schema dump does not recreate its extensions, which a dropped schema or a
+            # fresh database will not have
+            self.warn_extensions_elsewhere(
+                metadata['schema'], create_extensions(metadata['schema'], metadata[EXTENSIONS_KEY].split(',')))
         self.postgres_backup.restore_db(os.path.join(self.local_backup_dir, local_name))
+
+    def extensions_metadata(self, schema):
+        """The schema's extensions for the dump's metadata, so a restore can create them
+        first - pg_dump -n leaves them out of the dump."""
+        extensions = ','.join(get_schema_extensions(schema))
+        if not extensions:
+            return {}
+        if len(EXTENSIONS_KEY) + len(extensions.encode()) > MAX_METADATA_ITEM_BYTES:
+            self.logger.warning(f'Extensions of schema {schema} not recorded with the dump, too long for the '
+                                f'metadata: {extensions}')
+            return {}
+        return {EXTENSIONS_KEY: extensions}
+
+    def warn_extensions_elsewhere(self, schema, elsewhere):
+        for extension, other_schema in elsewhere.items():
+            self.logger.warning(f'Extension {extension} is installed in schema {other_schema}, not {schema} - '
+                                f'objects in the dump that use it are likely to fail to restore')
 
     def tier_prefixes(self):
         """{tier: key prefix} for lifecycle-rule reporting, or None when this config does

@@ -1,16 +1,14 @@
 import logging
-import re
 
 from celery import shared_task
-from django.db import connection
+from django.db import connection, transaction
 
 from .backup import Backup
 from .config import config_at
+from .sql_functions import SCHEMA_NAME_RE, create_extensions, get_schema_extensions
 from .utils import allowed_to_restore, RESTORE_BLOCKED_MESSAGE
 
 logger = logging.getLogger(__name__)
-
-SCHEMA_NAME_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
 
 
 @shared_task
@@ -92,9 +90,16 @@ try:
         if drop_schema:
             if not SCHEMA_NAME_RE.match(drop_schema):
                 raise ValueError(f'Invalid schema name for drop_schema: {drop_schema!r}')
-            with connection.cursor() as cursor:
-                cursor.execute(f'DROP SCHEMA "{drop_schema}" CASCADE')
-                cursor.execute(f'CREATE SCHEMA "{drop_schema}"')
+            # the CASCADE drops the schema's extensions too, and dumps made before they were
+            # recorded in the metadata cannot put them back. One transaction, so an extension
+            # that cannot be created again rolls the drop back rather than leaving the schema
+            # empty - pg_restore runs on its own connection, after the commit
+            with transaction.atomic():
+                extensions = get_schema_extensions(drop_schema)
+                with connection.cursor() as cursor:
+                    cursor.execute(f'DROP SCHEMA "{drop_schema}" CASCADE')
+                    cursor.execute(f'CREATE SCHEMA "{drop_schema}"')
+                create_extensions(drop_schema, extensions)
         backup = Backup(StateLogger(self), config=config_at(slug.get('config')))
         backup.get_backup_db().restore_db_from_storage(file_id=slug['pk'])
         return {'commands': [ajax_command('message', text='Restore Complete'), ajax_command('reload')]}

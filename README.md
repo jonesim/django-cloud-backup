@@ -43,6 +43,15 @@ Alongside that: a Django management UI for browsing, verifying and restoring bac
 Celery tasks for scheduling, MD5/ETag deduplication, per-schema database backups, and
 several named destinations in one project.
 
+A schema dump (`pg_dump -n`) does not include the extensions installed in that schema, so
+each schema dump records their names in its metadata (`extensions`, e.g. `pg_trgm`), and
+restoring it creates any that are missing first. Only extensions installed *in* that
+schema are recorded: one in `public` used by a tenant schema needs `public` restored
+first, and a restore warns when a recorded extension is installed in a different schema.
+The **Drop Restore** button, which runs `DROP SCHEMA ... CASCADE` and so removes the
+extensions too, notes them before dropping and recreates them afterwards in the same
+transaction, which also covers dumps made before this was recorded.
+
 ## Install
 
     pip install django-cloud-backup                # Google Drive destination
@@ -425,7 +434,7 @@ Points the page makes, and the reasons behind them:
   |---|---|---|
   | `listBuckets` | find the bucket; read its versioning, object-lock and lifecycle configuration (the checks on this page) | always |
   | `listFiles` | list backups for the UI, dedup and pruning | always |
-  | `readFiles` | download for restore, and read metadata (md5, schema, ip) | always |
+  | `readFiles` | download for restore, and read metadata (md5, schema, ip, extensions) | always |
   | `writeFiles` | upload backups, and server-side copies (tier promotion, `changed_files='history'`) | always |
   | `readBuckets` | `Get Bucket Versioning` | always - read-only, for this page |
   | `readBucketRetentions` | `Get Object Lock Configuration` | always - read-only, for this page |
