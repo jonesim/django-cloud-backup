@@ -32,7 +32,9 @@ OPTIONS = dict(DEFAULT_STATUS)
 NOW = datetime.datetime(2026, 8, 28, 10, 30)
 GRACE = datetime.timedelta(minutes=30)
 
-STORAGE = {'backend': 's3', 'bucket': 'bucket-db', 'b2': True, 'access_key_id': 'k', 'secret_key': 's'}
+# root pinned so the fixture keys below do not depend on the host project's BACKUP_ROOT
+STORAGE = {'backend': 's3', 'bucket': 'bucket-db', 'b2': True, 'access_key_id': 'k', 'secret_key': 's',
+           'root': 'django_backup'}
 CONFIGS = {
     'database': {'storage': STORAGE, 'dirs': [], 'db_tiers': True, 'retention': []},
     'files': {'storage': dict(STORAGE, bucket='bucket-files', root='backup'), 'dirs': [('/media', 'media')],
